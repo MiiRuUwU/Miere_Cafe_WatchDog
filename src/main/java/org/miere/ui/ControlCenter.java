@@ -1,75 +1,106 @@
 package org.miere.ui;
 
 import org.miere.core.ConfigHandler;
+import org.miere.core.Target;
 import org.miere.core.WatchDogEngine;
-import org.miere.security.SecurityManager;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.util.Map;
 
-/**
- * The main UI window for managing what apps we are actually watching.
- */
 public class ControlCenter {
 
-    /**
-     * Open the management window if the user isn't an impostor... SUSSYBAKA.
-     */
     public static void open() {
         if (!authenticate()) return;
 
-        // Create the window frame and set the size
         JFrame frame = new JFrame("WatchDog Control Center");
-        frame.setSize(700, 450);
+        frame.setSize(800, 500);
         frame.setLayout(new BorderLayout());
 
-        // Set up the table columns
-        String[] cols = {"EXE Path", "Delay (ms)"};
-        DefaultTableModel model = new DefaultTableModel(cols, 0);
-        WatchDogEngine.getTargetMap().forEach((p, d) -> model.addRow(new Object[]{p, d}));
+        // Header shows Seconds for clarity
+        String[] cols = {"EXE Path", "Interval (Seconds)", "Proactive?"};
+        DefaultTableModel model = new DefaultTableModel(cols, 0) {
+            @Override
+            public Class<?> getColumnClass(int columnIndex) {
+                return columnIndex == 2 ? Boolean.class : String.class;
+            }
 
-        // Initialize the table and buttons
+            // ALLOW EDITING: Column 1 (Seconds) and 2 (Proactive) can now be edited directly
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return column != 0; // Path remains locked to prevent accidental mess-ups
+            }
+        };
+
+        //Convert internal ms back to seconds for the display
+        WatchDogEngine.getTargetMap().values().forEach(t ->
+                model.addRow(new Object[]{t.path, (int)(t.intervalMs / 1000), t.isProactive})
+        );
+
         JTable table = new JTable(model);
         JPanel btnPanel = new JPanel();
         JButton addBtn = new JButton("Add Target");
         JButton remBtn = new JButton("Remove Selected");
         JButton saveBtn = new JButton("Save & Apply");
 
-        // Action to pick an EXE file because we can't guess what they want to watch DUMBAHH
         addBtn.addActionListener(e -> {
             FileDialog fd = new FileDialog(frame, "Select Executable", FileDialog.LOAD);
             fd.setVisible(true);
             if (fd.getFile() != null) {
                 String path = fd.getDirectory() + fd.getFile();
-                String delayStr = JOptionPane.showInputDialog("Restart delay (ms):", "2000");
-                if (delayStr != null) {
-                    try { model.addRow(new Object[]{path, Integer.parseInt(delayStr)}); }
-                    catch (Exception ex) { JOptionPane.showMessageDialog(frame, "Invalid Delay."); }
+                JTextField secField = new JTextField("30");
+                JCheckBox proBox = new JCheckBox("Enable Proactive Mode (Pulse)");
+                Object[] message = {"Restart interval (Seconds):", secField, proBox};
+
+                if (JOptionPane.showConfirmDialog(frame, message, "Add Shield", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION) {
+                    try {
+                        int seconds = Integer.parseInt(secField.getText());
+                        model.addRow(new Object[]{path, seconds, proBox.isSelected()});
+                    } catch (Exception ex) { JOptionPane.showMessageDialog(frame, "Invalid number entered."); }
                 }
             }
         });
 
-        // Remove the selected row
         remBtn.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row != -1) model.removeRow(row);
         });
 
-        // Write the changes to the config files because we want them to stay with me I love u so much pls don't leave me (I have anxious attachment)
         saveBtn.addActionListener(e -> {
-            Map<String, Integer> targets = WatchDogEngine.getTargetMap();
-            targets.clear();
-            for (int i = 0; i < model.getRowCount(); i++) {
-                targets.put(model.getValueAt(i, 0).toString(), Integer.parseInt(model.getValueAt(i, 1).toString()));
+            // If a user is still typing in a cell, stop editing to commit the value
+            if (table.isEditing()) {
+                table.getCellEditor().stopCellEditing();
             }
+
+            Map<String, Target> targets = WatchDogEngine.getTargetMap();
+            targets.clear();
+
+            for (int i = 0; i < model.getRowCount(); i++) {
+                try {
+                    String path = model.getValueAt(i, 0).toString();
+                    // Parse from table as seconds
+                    long sec = Long.parseLong(model.getValueAt(i, 1).toString());
+                    boolean isPro = (boolean) model.getValueAt(i, 2);
+
+                    // Re-instantiate targets (Target constructor handles the 30s floor)
+                    targets.put(path, new Target(path, sec, isPro));
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(frame, "Error in row " + (i + 1) + ": Invalid interval.");
+                }
+            }
+
             try {
                 ConfigHandler.saveState(targets, ConfigHandler.getStoredPasswordHash());
                 JOptionPane.showMessageDialog(frame, "Shields Updated! 🛡️");
+
+                // Refresh table to show auto-corrected values
+                model.setRowCount(0);
+                targets.values().forEach(t ->
+                        model.addRow(new Object[]{t.path, (int)(t.intervalMs / 1000), t.isProactive})
+                );
             } catch (Exception ex) { JOptionPane.showMessageDialog(frame, "Error saving config."); }
         });
 
-        // Add everything to the frame and make it visible [cite: 2026-03-08]
         btnPanel.add(addBtn); btnPanel.add(remBtn); btnPanel.add(saveBtn);
         frame.add(new JScrollPane(table), BorderLayout.CENTER);
         frame.add(btnPanel, BorderLayout.SOUTH);
@@ -77,64 +108,41 @@ public class ControlCenter {
         frame.setVisible(true);
     }
 
-    /**
-     * Change the admin password with a double-entry check to avoid typos.
-     */
     public static void changePassword() {
-        // Verify they know the current password before letting them change it [cite: 2026-03-08]
         if (!authenticate()) return;
-
 
         JPasswordField pf1 = new JPasswordField();
         Object[] msg1 = {"Enter NEW Password:", pf1};
         if (JOptionPane.showConfirmDialog(null, msg1, "Update Password", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
         String pass1 = new String(pf1.getPassword());
 
-        // Don't let them have a blank password because that's fckin stuped
         if (pass1.trim().isEmpty()) {
             JOptionPane.showMessageDialog(null, "Password cannot be empty!", "Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
 
-        // Make them type it again lol
         JPasswordField pf2 = new JPasswordField();
         Object[] msg2 = {"Confirm NEW Password:", pf2};
         if (JOptionPane.showConfirmDialog(null, msg2, "Update Password", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
-        String pass2 = new String(pf2.getPassword());
 
-        // Save if they match, complain if they don't ez
-        if (pass1.equals(pass2)) {
+        if (pass1.equals(new String(pf2.getPassword()))) {
             try {
-                String newHash = SecurityManager.hashPassword(pass1);
+                String newHash = org.miere.security.SecurityManager.hashPassword(pass1);
                 ConfigHandler.saveState(WatchDogEngine.getTargetMap(), newHash);
                 JOptionPane.showMessageDialog(null, "Password successfully updated! 🔐");
-            } catch (Exception e) {
-                JOptionPane.showMessageDialog(null, "Error saving new password.");
-            }
+            } catch (Exception e) { JOptionPane.showMessageDialog(null, "Error saving password."); }
         } else {
-            JOptionPane.showMessageDialog(null, "Passwords do not match! Aborting change.", "Typo Detected", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(null, "Passwords do not match!", "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    /**
-     * Ask for the password and return true if it matches the stored hash, I feel like this is obvious
-     */
     public static boolean authenticate() {
         JPasswordField pf = new JPasswordField();
-        Object[] message = {"Enter Admin Password:", pf};
-
-        int result = JOptionPane.showConfirmDialog(null, message, "Security Check", JOptionPane.OK_CANCEL_OPTION);
-
-        if (result == JOptionPane.OK_OPTION) {
-            String input = new String(pf.getPassword());
-            boolean isValid = SecurityManager.verifyPassword(input, ConfigHandler.getStoredPasswordHash());
-
-            // Show a skull because they are noob and they deserve to get testicular torsion
-            if (!isValid) {
-                JOptionPane.showMessageDialog(null, "Access Denied: Incorrect Password. 💀", "Auth Failure", JOptionPane.ERROR_MESSAGE);
-            }
+        if (JOptionPane.showConfirmDialog(null, new Object[]{"Enter Admin Password:", pf}, "Security Check", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION) {
+            boolean isValid = org.miere.security.SecurityManager.verifyPassword(new String(pf.getPassword()), ConfigHandler.getStoredPasswordHash());
+            if (!isValid) JOptionPane.showMessageDialog(null, "Access Denied. 💀", "Auth Failure", JOptionPane.ERROR_MESSAGE);
             return isValid;
         }
-        return false; // User bounced lolol
+        return false;
     }
 }
